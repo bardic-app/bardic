@@ -167,6 +167,15 @@ final class AppState: ObservableObject {
                 if rms > AudioRecorder.voiceLevel { self.lastVoiceAt = Date() }
             }
         }
+        recorder.onInputLost = { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, case .recording = self.phase else { return }
+                AppState.log.error("audio input changed while recording and couldn't be restarted")
+                self.hotkeys.reset()
+                self.phase = .error("The microphone changed mid-dictation. Try again.")
+                self.hud.flashAndHide()
+            }
+        }
         hotkeys.onEvent = { [weak self] e in self?.handle(e) }
         hotkeys.start()
         watchPermissions()
@@ -296,7 +305,10 @@ final class AppState: ObservableObject {
                     self.accessibilityGranted = ax
                     if ax { self.hotkeys.start() }
                 }
-                self.micGranted = Permissions.microphoneGranted
+                // Only assign on change: every write to a @Published property redraws all of
+                // Bardic's views, and this runs every 2 seconds for as long as the app is open.
+                let mic = Permissions.microphoneGranted
+                if mic != self.micGranted { self.micGranted = mic }
             }
         }
     }
@@ -362,6 +374,7 @@ final class AppState: ObservableObject {
             phase = .recording(handsFree: handsFree)
             hud.show()
         } catch {
+            AppState.log.error("recording didn't start: \(AppState.redactingHome(String(describing: error)), privacy: .public)")
             phase = .error(error.localizedDescription)
             hotkeys.reset()
             hud.flashAndHide()

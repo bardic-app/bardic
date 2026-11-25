@@ -19,9 +19,12 @@ let package = Package(
         .package(url: "https://github.com/ml-explore/mlx-swift-lm", exact: "2.31.3"),
     ],
     targets: [
+        // Objective-C, because only it can catch the NSExceptions AVAudioEngine raises.
+        .target(name: "BardicObjC"),
         .target(
             name: "BardicCore",
             dependencies: [
+                "BardicObjC",
                 .product(name: "WhisperKit", package: "WhisperKit"),
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
