@@ -1,11 +1,16 @@
 import AVFoundation
+import BardicObjC
 import Foundation
 
 /// Captures microphone audio and converts it to 16 kHz mono Float32, the format Whisper expects.
 public final class AudioRecorder {
     public static let sampleRate: Double = 16_000
 
-    private let engine = AVAudioEngine()
+    /// A new engine for every recording. A long-lived engine keeps the input format of the mic it
+    /// first saw; after the input changes (headset plugged in, AirPods connecting, wake from sleep)
+    /// installing a tap with that stale format raises an exception and recording silently fails.
+    private var engine: AVAudioEngine?
+    private var configObserver: NSObjectProtocol?
     private let targetFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32, sampleRate: AudioRecorder.sampleRate, channels: 1, interleaved: false)!
     private var converter: AVAudioConverter?
@@ -15,6 +20,10 @@ public final class AudioRecorder {
     /// Called on the audio thread with the RMS of each captured chunk (roughly every 25 ms).
     public var onLevel: ((Float) -> Void)?
 
+    /// Called on the main thread if the audio input changed mid-recording and the recorder couldn't
+    /// pick up the new input. Recording has stopped and the audio so far is dropped.
+    public var onInputLost: (() -> Void)?
+
     public private(set) var isRecording = false
 
     public init() {}
@@ -22,19 +31,7 @@ public final class AudioRecorder {
     public func start() throws {
         guard !isRecording else { return }
         lock.lock(); samples.removeAll(keepingCapacity: true); lock.unlock()
-
-        let input = engine.inputNode
-        let inputFormat = input.outputFormat(forBus: 0)
-        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
-            throw RecorderError.noInputDevice
-        }
-        converter = AVAudioConverter(from: inputFormat, to: targetFormat)
-
-        input.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
-            self?.handle(buffer)
-        }
-        engine.prepare()
-        try engine.start()
+        try startEngine()
         isRecording = true
     }
 
@@ -42,13 +39,75 @@ public final class AudioRecorder {
     @discardableResult
     public func stop() -> [Float] {
         guard isRecording else { return [] }
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        stopEngine()
         isRecording = false
         lock.lock(); defer { lock.unlock() }
         let out = samples
         samples.removeAll()
         return out
+    }
+
+    private func startEngine() throws {
+        let engine = AVAudioEngine()
+        let input = engine.inputNode
+        let inputFormat = input.outputFormat(forBus: 0)
+        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
+            throw RecorderError.noInputDevice
+        }
+        converter = AVAudioConverter(from: inputFormat, to: targetFormat)
+
+        var startError: Error?
+        do {
+            try BardicObjC.catchingExceptions {
+                input.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
+                    self?.handle(buffer)
+                }
+                engine.prepare()
+                do { try engine.start() } catch { startError = error }
+            }
+        } catch {
+            startError = error
+        }
+        if let startError {
+            _ = try? BardicObjC.catchingExceptions {
+                input.removeTap(onBus: 0)
+                engine.stop()
+            }
+            throw RecorderError.couldNotStart(startError.localizedDescription)
+        }
+
+        self.engine = engine
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+        ) { [weak self] _ in
+            self?.inputChanged()
+        }
+    }
+
+    private func stopEngine() {
+        if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
+        configObserver = nil
+        if let engine {
+            _ = try? BardicObjC.catchingExceptions {
+                engine.inputNode.removeTap(onBus: 0)
+                engine.stop()
+            }
+        }
+        engine = nil
+    }
+
+    /// The input device or its format changed (a headset plugged in, AirPods switching to their
+    /// microphone profile, which happens as soon as recording starts on them). The engine stops
+    /// itself, so carry on with a new one, keeping what was already captured.
+    private func inputChanged() {
+        guard isRecording else { return }
+        stopEngine()
+        do {
+            try startEngine()
+        } catch {
+            isRecording = false
+            onInputLost?()
+        }
     }
 
     private func handle(_ buffer: AVAudioPCMBuffer) {
@@ -137,6 +196,12 @@ public final class AudioRecorder {
 
     public enum RecorderError: LocalizedError {
         case noInputDevice
-        public var errorDescription: String? { "No microphone input device is available." }
+        case couldNotStart(String)
+        public var errorDescription: String? {
+            switch self {
+            case .noInputDevice: return "No microphone input device is available."
+            case .couldNotStart: return "The microphone couldn't start. Try again."
+            }
+        }
     }
 }

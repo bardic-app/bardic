@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **Fixed dictation silently doing nothing after the microphone changed** (a headset or AirPods
+  connecting, waking from sleep). Bardic now sets up the mic fresh for each recording, keeps recording
+  if the input switches mid-dictation, and shows an error instead of failing silently if the mic
+  can't start. These silent failures could also leave Bardic stuck, using CPU while idle and ignoring Quit.
+
 ## 0.3.0
 
 - **New default cleanup model: Qwen3 4B** (about 2.3 GB). It scores as well as Qwen 2.5 3B on the eval
