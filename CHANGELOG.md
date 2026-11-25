@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
 
 - **Fixed dictation silently doing nothing after the microphone changed** (a headset or AirPods
   connecting, waking from sleep). Bardic now sets up the mic fresh for each recording, keeps recording
